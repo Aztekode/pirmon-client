@@ -14,6 +14,7 @@ type Config struct {
 	ReportInterval  uint            `yaml:"report_interval"`
 	MonitorInterval uint            `yaml:"monitor_interval"`
 	Services        []ServiceConfig `yaml:"services"`
+	EventLogMinutes int             `yaml:"event_log_minutes"`
 }
 
 func (c *Config) ServerURLNoProtocol() string {
@@ -32,6 +33,7 @@ type ServiceConfig struct {
 	ExpectedStatus     string `yaml:"expected_status" json:"expected_status"`
 	AutoStartIfStopped bool   `yaml:"auto_start_if_stopped" json:"auto_start_if_stopped"`
 	OnlyReport         string `yaml:"only_report" json:"only_report"`
+	FetchEventLogs     bool   `yaml:"fetch_event_logs,omitempty"`
 }
 
 func readConfig() Config {

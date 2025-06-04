@@ -2,6 +2,7 @@ server_url: "http://127.0.0.1:7001"
 server_version: "v1"
 report_interval: 60 # Seconds
 monitor_interval: 600 # Milliseconds
+event_log_minutes: 10
 services:
   - name: "wuauserv"
     expected_status: "running"
