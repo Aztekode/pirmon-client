@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/ricochet2200/go-disk-usage/du"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 )
@@ -20,6 +21,7 @@ type SystemStats struct {
 	MemoryUsed  uint64          `json:"memory_used"`
 	MemoryTotal uint64          `json:"memory_total"`
 	MemoryUsage float64         `json:"memory_usage_percent"`
+	DiskUsage   uint64          `json:"disk_usage"`
 	Services    []ServiceConfig `json:"services"`
 }
 
@@ -42,6 +44,7 @@ func startSystemStatsWebSocket(config Config) {
 
 			cpuPercentages, _ := cpu.Percent(0, false)
 			memStats, _ := mem.VirtualMemory()
+			diskUsage := du.NewDiskUsage("C:\\").Available()
 
 			stats := SystemStats{
 				Hostname:    hostname,
@@ -51,6 +54,7 @@ func startSystemStatsWebSocket(config Config) {
 				MemoryUsed:  memStats.Used,
 				MemoryTotal: memStats.Total,
 				MemoryUsage: memStats.UsedPercent,
+				DiskUsage:   diskUsage,
 				Services:    config.Services,
 			}
 

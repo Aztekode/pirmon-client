@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/windows/svc/mgr"
@@ -40,6 +41,10 @@ type AutoStartAlert struct {
 	Hostname    string    `json:"hostname"`
 	IP          string    `json:"ip"`
 }
+
+// Mapa para guardar el último estado conocido de los servicios
+var lastStates = make(map[string]ServiceStatus)
+var mu sync.Mutex // para proteger acceso a lastStates
 
 // LogErrorToFile guarda errores y payloads en client.log
 func LogErrorToFile(err error, payload []byte) {
@@ -89,14 +94,14 @@ func sendAutoStartAlert(serverURL, version, serviceName string) {
 
 // checkServices revisa el estado de los servicios indicados
 func checkServices(config Config) []ServiceStatus {
-	var results []ServiceStatus
-
 	m, err := mgr.Connect()
 	if err != nil {
 		log.Println("Error al conectar con el manejador de servicios:", err)
-		return results
+		return nil
 	}
 	defer m.Disconnect()
+
+	var results []ServiceStatus
 
 	for _, cfg := range config.Services {
 		status := ServiceStatus{Name: cfg.Name}
@@ -118,40 +123,65 @@ func checkServices(config Config) []ServiceStatus {
 				default:
 					status.Status = fmt.Sprintf("state_%d", s.State)
 				}
-
-				// Verifica estado esperado vs real
-				if cfg.ExpectedStatus != "" && status.Status != cfg.ExpectedStatus {
-					// Guardamos el error pero NO cambiamos aún el status
-					status.Error = fmt.Sprintf("Estado actual '%s' difiere del esperado '%s'", status.Status, cfg.ExpectedStatus)
-
-					// Creamos una copia del status antes de actuar
-					results = append(results, status)
-
-					// Luego intentamos iniciar el servicio
-					if cfg.ExpectedStatus == "running" && status.Status == "stopped" && cfg.AutoStartIfStopped {
-						err := svc.Start()
-						if err != nil {
-							status.Error += fmt.Sprintf(" | Falló al iniciar: %s", err.Error())
-						} else {
-							status.Error += " | Servicio iniciado automáticamente."
-							status.Status = "running"
-							sendAutoStartAlert(config.ServerURL, config.ServerVersion, cfg.Name)
-						}
-
-						// Registramos el nuevo estado después de intentar iniciar
-						results = append(results, ServiceStatus{
-							Name:   cfg.Name,
-							Status: status.Status,
-							Error:  status.Error,
-						})
-
-						svc.Close()
-						continue // ya agregamos ambos estados, continuamos
-					}
-				}
 			}
 			svc.Close()
 		}
+
+		// Verificamos si hubo un cambio con respecto al último estado conocido
+		mu.Lock()
+		last, exists := lastStates[cfg.Name]
+		mu.Unlock()
+
+		changed := !exists || last.Status != status.Status || last.Error != status.Error
+
+		// Si estado no cambió, y no hay error, no agregamos para reportar
+		if !changed {
+			continue
+		}
+
+		// Guardamos el estado actual para la próxima comparación
+		mu.Lock()
+		lastStates[cfg.Name] = status
+		mu.Unlock()
+
+		// Si hay un estado esperado y difiere del actual, intentamos autoarrancar
+		if cfg.ExpectedStatus != "" && status.Status != cfg.ExpectedStatus {
+			status.Error = fmt.Sprintf("Estado actual '%s' difiere del esperado '%s'", status.Status, cfg.ExpectedStatus)
+
+			// Intentar autoarrancar si corresponde
+			if cfg.ExpectedStatus == "running" && status.Status == "stopped" && cfg.AutoStartIfStopped {
+				m, err := mgr.Connect()
+				if err != nil {
+					status.Error += fmt.Sprintf(" | Error al conectar para iniciar servicio: %s", err)
+				} else {
+					svc, err := m.OpenService(cfg.Name)
+					if err != nil {
+						status.Error += fmt.Sprintf(" | Error al abrir servicio: %s", err)
+					} else {
+						err = svc.Start()
+						if err != nil {
+							status.Error += fmt.Sprintf(" | Falló al iniciar: %s", err)
+						} else {
+							// Esperar un momento para que el servicio cambie su estado
+							time.Sleep(3 * time.Second)
+
+							// Reconsultar el estado para confirmar
+							s, err := svc.Query()
+							if err == nil && s.State == 4 {
+								status.Status = "running"
+								status.Error += " | Servicio iniciado automáticamente."
+								sendAutoStartAlert(config.ServerURL, config.ServerVersion, cfg.Name)
+							} else {
+								status.Error += " | Intento de inicio no confirmado."
+							}
+						}
+						svc.Close()
+					}
+					m.Disconnect()
+				}
+			}
+		}
+
 		results = append(results, status)
 	}
 
@@ -204,21 +234,23 @@ func runClientLoop() {
 			})
 		}
 
-		payload, _ := json.Marshal(logs)
+		if len(logs) > 0 {
+			payload, _ := json.Marshal(logs)
 
-		resp, err := http.Post(fmt.Sprintf("%s/api/%s/log/report", config.ServerURL, config.ServerVersion), "application/json", bytes.NewBuffer(payload))
-		if err != nil {
-			log.Println("Error al enviar logs:", err)
-			LogErrorToFile(err, payload)
-		} else {
-			defer resp.Body.Close()
-			var response ServerResponse
-			body, _ := ioutil.ReadAll(resp.Body)
-			json.Unmarshal(body, &response)
-			if response.UpdateConfig != nil {
-				log.Println("Configuración actualizada desde el servidor.")
-				writeConfig(*response.UpdateConfig)
-				config = *response.UpdateConfig
+			resp, err := http.Post(fmt.Sprintf("%s/api/%s/log/report", config.ServerURL, config.ServerVersion), "application/json", bytes.NewBuffer(payload))
+			if err != nil {
+				log.Println("Error al enviar logs:", err)
+				LogErrorToFile(err, payload)
+			} else {
+				defer resp.Body.Close()
+				var response ServerResponse
+				body, _ := ioutil.ReadAll(resp.Body)
+				json.Unmarshal(body, &response)
+				if response.UpdateConfig != nil {
+					log.Println("Configuración actualizada desde el servidor.")
+					writeConfig(*response.UpdateConfig)
+					config = *response.UpdateConfig
+				}
 			}
 		}
 
